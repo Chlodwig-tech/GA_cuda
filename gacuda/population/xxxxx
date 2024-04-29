@@ -1,0 +1,125 @@
+template<typename T> __global__ void PerformCrossoverWithChildren(T* *individuals, T* *children, bool *children_indexes, int size, float probability)
+{
+    int index = blockDim.x * blockIdx.x + threadIdx.x;
+    if(index < size){
+        curandState state;
+        curand_init(clock64(), index, 0, &state);
+        bool cond = curand_uniform(&state) * 100.0f < probability;
+        children_indexes[index] = cond;
+        if(cond){
+            int parent_index = curand_uniform(&state) * size;
+            individuals[index]->crossoverwithchild(&state, individuals[parent_index], children[index]);
+        }
+    }
+}
+template<typename T> __global__ void bitonicSortChildrenKernel(T* *individuals, bool *indexes, int size, int j, int k)
+{
+
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    int ixj = tid ^ j;
+    if(tid < size && ixj < size && ixj > tid && !(((tid & k) == 0) 
+        ^ ((!indexes[tid] && indexes[ixj]) || (indexes[tid] && indexes[ixj] && individuals[tid]->is_greater(individuals[ixj])))
+    ))
+    {
+        T* temp = individuals[tid];
+        individuals[tid] = individuals[ixj];
+        individuals[ixj] = temp;
+
+        bool btemp = indexes[tid];
+        indexes[tid] = indexes[ixj];
+        indexes[ixj] = btemp;
+    }
+}
+template<typename T> __global__ void potentialCandidateKernel(T* *best, T* *candidate)
+{
+        if(best[0]->is_greater(candidate[0])){
+            best[0]->Set(candidate[0]);
+        }
+}
+template<typename T> __global__ void printChildrenKernel(T* *children, bool *children_indexes, int size)
+{
+    for(int i = 0; i < size; i++){
+        if(children_indexes[i]){
+            printf("%d: ", i);
+            children[i]->print();
+        }
+    }
+    printf("\n");
+}
+template<typename T> __global__ void mergeKernel(T* *individuals, T* *childre, bool indexes, int size){
+
+}
+
+template<typename T> class SsPopulation{
+    T* *individuals;
+    T* *children;
+    bool *children_indexes;
+    T*  *best;
+    int size;
+    int pnumThreads;
+    int pnumBlocks;
+public:
+    SsPopulation(int size) : size(size){
+        pnumThreads = 1024;
+        pnumBlocks = size / pnumThreads + 1;
+        CUDA_CALL(cudaMalloc((void **)&individuals, size * sizeof(T)), "Population cudaMalloc");
+        CUDA_CALL(cudaMalloc((void **)&children, size * sizeof(T)), "Population children cudaMalloc");
+        CUDA_CALL(cudaMalloc((void **)&best, size * sizeof(T)), "Population best cudaMalloc");
+        CUDA_CALL(cudaMalloc((void **)&children_indexes, size * sizeof(bool)), "Population children_indexes cudaMalloc");
+        initIndividualsKernel<<<pnumBlocks, pnumThreads>>>(individuals, size);
+        initIndividualsKernel<<<pnumBlocks, pnumThreads>>>(children, size);
+        initIndividualsKernel<<<1, 1>>>(best, 1);
+    }
+    ~SsPopulation(){
+        deinitIndividualsKernel<<<pnumBlocks, pnumThreads>>>(individuals, size);
+        deinitIndividualsKernel<<<pnumBlocks, pnumThreads>>>(children, size);
+        CUDA_CALL(cudaFree(individuals), "Population cudaFree");
+        CUDA_CALL(cudaFree(children), "Population children cudaFree");
+        deinitIndividualsKernel<<<1, 1>>>(best, 1);
+        CUDA_CALL(cudaFree(best), "Population best cudaFree");
+        CUDA_CALL(cudaFree(children_indexes), "Population children_indexes cudaFree");
+    }
+    void print(){
+        printKernel<<<1, 1>>>(individuals, size);
+        cudaDeviceSynchronize();
+        printf("Best:\n");
+        printKernel<<<1, 1>>>(best, 1);
+        cudaDeviceSynchronize();
+        printf("\n");
+    }
+    void print_children(){
+        printf("Children\n");
+        printChildrenKernel<<<1, 1>>>(children, children_indexes, size);
+        cudaDeviceSynchronize();
+    }
+    void print_best(){
+        printKernel<<<1, 1>>>(best, 1);
+    }
+    template<typename r> void random(r a, r b){
+        RandomKernel<<<pnumBlocks, pnumThreads>>>(individuals, size, a, b);
+        RandomKernel<<<1, 1>>>(best, 1, a, b);
+        CalculateFitnessKernel<<<1, 1>>>(best, 1);
+    }
+    void calculate_fitness(){
+        CalculateFitnessKernel<<<pnumBlocks, pnumThreads>>>(individuals, size);
+    }
+    void mutate(float probability=1.0f){
+        PerformMutations<<<pnumBlocks, pnumThreads>>>(individuals, size, probability);
+    }
+    void crossover(float probability=1.0f){
+        PerformCrossover<<<pnumBlocks, pnumThreads>>>(individuals, size, probability);
+        /*PerformCrossover<<<pnumBlocks, pnumThreads>>>(
+            individuals, children, children_indexes, size, probability
+        );*/
+    }
+    void sort(){
+        bitonicSortKernel<<<pnumBlocks, pnumThreads>>>(individuals, size);
+        mergeKernel<<<pnumBlocks, pnumThreads>>>(individuals, children, children_indexes, size);
+        potentialCandidateKernel<<<1, 1>>>(best, individuals);
+    }
+
+    void run(int number_of_epochs, float mprobability=1.0f, float pprobability=1.0f){
+        runKernel<<<pnumBlocks, pnumThreads>>>(individuals, best, size, mprobability, pprobability, number_of_epochs);
+    }
+
+};
